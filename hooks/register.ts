@@ -1,23 +1,24 @@
 import type { Register } from 'claude-code'
 
-// Herdr desktop has no public pane API: we read its layout file (herdr-core
-// docs.json, next to HC_TERMINAL_SOCKET) and drive it with its own shortcuts.
-// shortcut: depends on undocumented docs.json shape and default keybindings; switch to an API if Herdr ships one.
+// Herdr desktop: panes are split with its CLI (`herdr-app do pane.split`), but the
+// CLI does not expose the split tree, so that is read from herdr-core's docs.json
+// (next to HC_TERMINAL_SOCKET), where a block's `id` is its pane id.
+// shortcut: depends on the undocumented docs.json shape; switch when herdr-app can report the layout.
 
 type LayoutNode = {
+  id?: string
   type?: string
   children?: LayoutNode[]
   content?: { terminal?: string }
 }
 
-export type SplitPlan = { kind: 'right' } | { kind: 'down'; downPresses: number }
+export type SplitPlan = { target: string; direction: 'right' | 'down' }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const TERMINAL_ID = /^t\d+$/
 
-function countPanes(node: LayoutNode): number {
-  if (node.content?.terminal) return 1
-  return (node.children ?? []).reduce((sum, child) => sum + countPanes(child), 0)
+function lastPane(node: LayoutNode): LayoutNode {
+  const last = node.children?.at(-1)
+  return last ? lastPane(last) : node
 }
 
 function pathTo(node: LayoutNode, terminalId: string): LayoutNode[] | undefined {
@@ -29,21 +30,22 @@ function pathTo(node: LayoutNode, terminalId: string): LayoutNode[] | undefined 
   return undefined
 }
 
-/** Split right when nothing is to our right; else split down at the bottom of the column right of us. */
+/** Herdr desktop: split our pane right when nothing is to our right; else split down the bottom pane of the column right of us. */
 export function planSplit(docs: unknown, terminalId: string): SplitPlan | undefined {
   const spaces = (docs as any)?.['herdr-app']?.value?.spaces ?? []
   for (const space of spaces) {
     for (const tab of space?.tabs ?? []) {
-      const path = tab?.root && pathTo(tab.root, terminalId)
+      const path: LayoutNode[] | undefined = tab?.root && pathTo(tab.root, terminalId)
       if (!path) continue
       for (let depth = path.length - 2; depth >= 0; depth--) {
-        const parent = path[depth]
-        const index = parent.children!.indexOf(path[depth + 1])
-        const rightSibling = parent.type === 'row' ? parent.children![index + 1] : undefined
-        // Cmd+Option+Down stops at the bottom pane, so one press per pane always reaches it.
-        if (rightSibling) return { kind: 'down', downPresses: countPanes(rightSibling) }
+        const parent = path[depth]!
+        const siblings = parent.children ?? []
+        const rightSibling = parent.type === 'row' ? siblings[siblings.indexOf(path[depth + 1]!) + 1] : undefined
+        const target = rightSibling && lastPane(rightSibling).id
+        if (target) return { target, direction: 'down' }
       }
-      return { kind: 'right' }
+      const self = path.at(-1)?.id
+      return self ? { target: self, direction: 'right' } : undefined
     }
   }
   return undefined
@@ -53,7 +55,7 @@ type Rect = { x: number; y: number; width: number; height: number }
 type TuiLayout = { panes?: { pane_id: string; rect: Rect }[] }
 
 /** Herdr TUI: split right when nothing is to our right; else split down the bottom pane of the nearest column to our right. */
-export function planTuiSplit(layout: TuiLayout, selfId: string): { target: string; direction: 'right' | 'down' } | undefined {
+export function planTuiSplit(layout: TuiLayout, selfId: string): SplitPlan | undefined {
   const panes = layout.panes ?? []
   const self = panes.find(pane => pane.pane_id === selfId)?.rect
   if (!self) return undefined
@@ -66,50 +68,6 @@ export function planTuiSplit(layout: TuiLayout, selfId: string): { target: strin
     .filter(pane => pane.rect.x === nearestX)
     .reduce((low, pane) => (pane.rect.y > low.rect.y ? pane : low))
   return { target: bottom.pane_id, direction: 'down' }
-}
-
-export function buildAppleScript(plan: SplitPlan, command: string): string {
-  // key codes: 2 = d, 9 = v, 36 = Return, 124 = right arrow, 125 = down arrow
-  const split =
-    plan.kind === 'right'
-      ? 'key code 2 using {command down}'
-      : [
-          'key code 124 using {command down, option down}',
-          'delay 0.15',
-          `repeat ${plan.downPresses} times`,
-          'key code 125 using {command down, option down}',
-          'delay 0.1',
-          'end repeat',
-          'key code 2 using {command down, shift down}',
-        ].join('\n')
-
-  // The command is pasted, not typed: typed keystrokes break under a CJK input method.
-  return `on requireHerdr()
-tell application "System Events" to set frontId to bundle identifier of first application process whose frontmost is true
-if frontId is not "dev.herdr.app" then error "Herdr is not the frontmost app (" & frontId & "), stopped"
-end requireHerdr
-
-requireHerdr()
-tell application "System Events"
-${split}
-end tell
-delay 0.8
-set hadClipboard to true
-try
-set savedClipboard to the clipboard
-on error
-set hadClipboard to false
-end try
-set the clipboard to "${command}"
-requireHerdr()
-tell application "System Events"
-key code 9 using {command down}
-delay 0.3
-key code 36
-end tell
-delay 0.3
-if hadClipboard then set the clipboard to savedClipboard
-`
 }
 
 export const register: Register = on => {
@@ -154,29 +112,42 @@ export const register: Register = on => {
         return { text: `branch-pane: opened ${newPaneId} (${plan.direction} of ${plan.target}) running \`${command}\`.` }
       }
 
+      // Herdr desktop app: it injects HC_TERMINAL_ID (a terminal address, not a pane id).
       const terminalId = (await $.env.get('HC_TERMINAL_ID')) ?? ''
       const socketPath = (await $.env.get('HC_TERMINAL_SOCKET')) ?? ''
-      if (!TERMINAL_ID.test(terminalId) || !socketPath) {
+      if (!terminalId || !socketPath) {
         return {
           text: `branch-pane: not running inside Herdr (no HERDR_PANE_ID; HC_TERMINAL_ID="${terminalId}", HC_TERMINAL_SOCKET="${socketPath}").`,
         }
       }
 
-      const docsPath = socketPath.replace(/[^/]+$/, 'docs.json')
-      const docsFile = await $.process.run(['/bin/cat', docsPath])
-      if (docsFile.exitCode !== 0) return { text: `branch-pane: cannot read ${docsPath}: ${docsFile.stderr.trim()}` }
-
-      const plan = planSplit(JSON.parse(docsFile.stdout), terminalId)
+      const docsPath = socketPath.replace(/[^/\\]+$/, 'docs.json')
+      const plan = planSplit(JSON.parse(await $.fs.read(docsPath)), terminalId)
       if (!plan) return { text: `branch-pane: terminal ${terminalId} not found in ${docsPath}.` }
 
-      const script = await $.process.run(['/usr/bin/osascript'], {
-        stdin: buildAppleScript(plan, command),
-        timeoutMs: 20_000,
-      })
-      if (script.exitCode !== 0) return { text: `branch-pane: osascript failed: ${script.stderr.trim()}` }
+      // A split's argv runs without the login shell's environment (no .zshrc exports) and its
+      // pane closes when it exits, so go through the shell and leave one open afterwards.
+      const shell = await $.env.get('SHELL')
+      const argv = shell
+        ? [shell, '-lic', `${command}; exec "$SHELL" -l`]
+        : ['claude', '--resume', sessionId, '--fork-session']
 
-      const where = plan.kind === 'right' ? 'a new pane on the right' : 'a new pane under the right column'
-      return { text: `branch-pane: opened ${where} running \`${command}\`.` }
+      const env: Record<string, string> = {}
+      const path = await $.env.get('PATH')
+      const home = await $.env.get('HOME')
+      if (path) env.PATH = path
+      if (home) env.HOME = home
+      const herdrApp = async (name: string, args: object) => {
+        const ran = await $.process.run(['herdr-app', 'do', name, JSON.stringify(args)], { env })
+        if (ran.exitCode !== 0) throw new Error(`herdr-app do ${name}: ${ran.stderr.trim() || ran.stdout.trim()}`)
+        return JSON.parse(ran.stdout)
+      }
+
+      const split = await herdrApp('pane.split', { direction: plan.direction, pane: plan.target, argv })
+      if (!split?.pane) return { text: `branch-pane: herdr-app split returned no pane id.` }
+      await herdrApp('pane.focus', { pane: split.pane })
+
+      return { text: `branch-pane: opened ${split.terminal ?? split.pane} (${plan.direction} of ${plan.target}) running \`${command}\`.` }
     } catch (error) {
       return { text: `branch-pane: failed: ${error instanceof Error ? error.message : String(error)}` }
     }

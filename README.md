@@ -51,27 +51,30 @@ Inside Claude Code running in a Herdr pane:
   │     herdr pane split <self | bottom of right column> --direction right|down --focus --cwd <cwd>
   │     herdr pane run <new pane> "claude --resume <id> --fork-session"
   │
-  └─ HC_TERMINAL_ID set (Herdr desktop app, macOS)
-        read herdr-core docs.json (next to HC_TERMINAL_SOCKET) → layout tree
-        osascript / System Events sends Herdr's own shortcuts:
-          Cmd+D (split right)  or  Cmd+Option+→, Cmd+Option+↓ × n, Cmd+Shift+D (split down)
-        paste the command via the clipboard, press Return, restore the clipboard
+  └─ HC_TERMINAL_ID set (Herdr desktop app)
+        read herdr-core docs.json (next to HC_TERMINAL_SOCKET) → split tree; a block's id is its pane id
+        herdr-app do pane.split {direction, pane: <self | bottom of right column>,
+                                 argv: [$SHELL, "-lic", "claude --resume <id> --fork-session; exec \"$SHELL\" -l"]}
+        herdr-app do pane.focus {pane: <new pane>}
 ```
+
+On the desktop app the fork is started through your login shell: a split's `argv` otherwise runs without the shell's environment (no `.zshrc` exports), and its pane closes as soon as the program exits. Going through the shell gives the fork the same environment as a Claude you start by hand, and leaves a shell in the pane when it exits.
 
 ## Requirements
 
 | Environment | Requirements |
 |---|---|
 | herdr TUI | `herdr` on `PATH` (Linux / macOS; Windows is untested) |
-| Herdr desktop app | macOS only. Default keybindings: `Cmd+D` split right, `Cmd+Shift+D` split down, `Cmd+Option+Arrow` move focus. Grant **Herdr** Accessibility access (System Settings → Privacy & Security → Accessibility) the first time; until then osascript fails with `not allowed to send keystrokes (1002)` |
+| Herdr desktop app | `herdr-app` on `PATH` (the app installs it). Tested on macOS with Herdr 0.1.16; Linux and Windows are untested |
+
+No Accessibility permission, keybinding or clipboard access is needed.
 
 ## Limitations
 
-- The desktop-app path depends on Herdr's undocumented `docs.json` layout file and its default shortcuts; a Herdr update may break it.
-- The desktop-app path checks that Herdr is the frontmost app before each keystroke and stops otherwise, so switching windows during the ~1 s it runs aborts it.
-- The desktop-app path pastes the command through the clipboard and restores it afterwards; unusual clipboard formats may not restore exactly.
+- The desktop-app path reads the split tree from Herdr's undocumented `docs.json`, because `herdr-app ls` does not report it; a Herdr update may break that.
 - Only the column immediately to the right is considered when there are several.
 - Focus moves to the new pane.
+- The fork starts on your default model, not the model the original session was switched to.
 
 ## Development
 

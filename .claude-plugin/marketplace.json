@@ -1,0 +1,6 @@
+{
+  "name": "herdr-branch-pane",
+  "description": "Claude Code mod: /branch-pane forks the current session into a new Herdr pane",
+  "owner": { "name": "AaronLi963" },
+  "plugins": [{ "name": "herdr-branch-pane", "source": "./" }]
+}

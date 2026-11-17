@@ -1,0 +1,5 @@
+{
+  "name": "herdr-branch-pane",
+  "version": "0.1.0",
+  "description": "/branch-pane: fork this Claude session into a new Herdr desktop pane (right, or down in the right column)"
+}
